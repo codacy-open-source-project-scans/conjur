@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -e
+
+# This file has an implicit dependency on the environment variables defined in
+# "ci/docker-compose.yml" keycloak section.
+
+# This is executed by the main "ci/test" script after cd-ing into "ci".
+# shellcheck disable=SC1091
+source "./shared.sh"
+source "./oauth/keycloak/keycloak_functions.sh"
+
+function _hydrate_all_env_args() {
+  local -n arr=$1
+  local keycloak_items
+
+  readarray -t keycloak_items < <(
+    set -o pipefail
+    # Note: This prints all lines that look like:
+    # KEYCLOAK_XXX=someval
+    $COMPOSE exec -T "${KEYCLOAK_SERVICE_NAME}" printenv | awk '/KEYCLOAK/'
+  )
+
+  # shellcheck disable=SC2034
+  arr=(
+    "${keycloak_items[@]}"
+    "KEYCLOAK_CA_CERT=$($COMPOSE exec conjur cat /etc/ssl/certs/keycloak.pem)"
+    "PROVIDER_URI=https://keycloak:8443/auth/realms/master"
+    "PROVIDER_INTERNAL_URI=http://keycloak:8080/auth/realms/master/protocol/openid-connect"
+    "PROVIDER_ISSUER=http://keycloak:8080/auth/realms/master"
+    "ID_TOKEN_USER_PROPERTY=preferred_username"
+    "OKTA_CLIENT_ID=$OKTA_CLIENT_ID"
+    "OKTA_CLIENT_SECRET=$OKTA_CLIENT_SECRET"
+    "OKTA_PROVIDER_URI=${OKTA_PROVIDER_URI}oauth2/default"
+    "OKTA_USERNAME=$OKTA_USERNAME"
+    "OKTA_PASSWORD=$OKTA_PASSWORD"
+  )
+}
+
+function main() {
+  local parallel_services
+  read -ra parallel_services <<< "$(get_parallel_services 'conjur pg')"
+  $COMPOSE up --no-deps -d "${parallel_services[@]}" keycloak
+
+  # We also run an ldap-server container for testing the OIDC & LDAP combined
+  # use-case.  We can't run this use-case in a separate Jenkins step because
+  # we'll have a port bind for keycloak.
+  start_ldap_server
+
+  wait_for_keycloak_server
+  create_keycloak_users
+  fetch_keycloak_certificate
+
+  # Delete the symlink so we can test with the 'ca-cert' variable
+  local conjur_parallel_services
+  read -ra conjur_parallel_services <<< "$(get_parallel_services 'conjur')"
+  for parallel_service in "${conjur_parallel_services[@]}"; do
+    hash=$($COMPOSE exec "${parallel_service}" openssl x509 -hash -in /etc/ssl/certs/keycloak.pem --noout)
+    $COMPOSE exec "${parallel_service}" rm "/etc/ssl/certs/$hash.0" || true
+  done
+
+  additional_services='ldap-server keycloak'
+  _run_cucumber_tests authenticators_oidc "$additional_services" \
+    _hydrate_all_env_args
+}
+
+main

@@ -1,0 +1,540 @@
+#!/usr/bin/env bash
+#
+# NOTE: You must execute this script from this directory (dev).
+set -ex
+set -o pipefail
+export PARALLEL_PROCESSES=1
+
+# SCRIPT GLOBAL STATE
+
+# Set up VERSION file for local development
+if [ ! -f "../VERSION" ]; then
+  echo -n "0.0.dev" > ../VERSION
+fi
+
+# Minimal set of services.  We add to this list based on cmd line flags.
+services=(pg conjur client)
+
+# Authenticators to enable. 
+default_authenticators="authn,authn-k8s/test"
+enabled_authenticators="$default_authenticators"
+
+# Environment args to set in the container we get dropped into.
+env_args=()
+
+# Services and authenticators to start, enabled by cmd line flags.
+ENABLE_AUDIT=false
+ENABLE_AUTHN_AZURE=false
+ENABLE_AUTHN_GCP=false
+ENABLE_AUTHN_IAM=false
+ENABLE_AUTHN_JWT=false
+ENABLE_AUTHN_LDAP=false
+ENABLE_AUTHN_OIDC=false
+ENABLE_METRICS=false
+ENABLE_OIDC_ADFS=false
+ENABLE_OIDC_IDENTITY=false
+ENABLE_OIDC_KEYCLOAK=false
+ENABLE_OIDC_OKTA=false
+ENABLE_ROTATORS=false
+IDENTITY_USER=""
+COMPOSE="docker compose"
+
+declare -a required_envvars
+required_envvars[identity]="IDENTITY_CLIENT_ID IDENTITY_CLIENT_SECRET IDENTITY_PROVIDER_URI"
+required_envvars[azure]="AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP"
+
+main() {
+  unset COMPOSE_PROJECT_NAME
+  parse_options "$@"
+
+  check_env_vars
+
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker does not seem to be running, run it first and retry"
+    exit 1
+  fi
+
+  # Build docker images.
+  docker compose build --pull
+
+  init_data_key
+  init_audit_service
+
+  # Install gems, create DB, and create cucumber account.
+  docker compose up -d --no-deps "${services[@]}"
+  docker compose exec conjur bundle
+  docker compose exec conjur conjurctl db migrate
+  docker compose exec conjur conjurctl account create cucumber || true
+
+  migrate_audit_db
+
+  start_conjur_server
+
+  init_ldap
+  init_iam
+  init_azure
+  init_gcp
+  init_jwt
+  init_oidc
+  init_rotators
+  init_metrics
+
+  # Updates CONJUR_AUTHENTICATORS and restarts required services.
+  start_auth_services
+  create_alice
+  kill_conjur # so dev's can restart it manually
+  enter_container
+}
+
+print_help() {
+  cat << EOF
+Starts Conjur for development. Once setup is complete, the user is dropped into
+the Conjur container.  To start the application server, run:
+    # conjurctl server
+
+Usage: start [options]
+    --audit         Starts with the audit engine and database enabled
+    --authn-azure   Starts with authn-azure/prod as authenticator
+    --authn-gcp     Starts with authn-gcp as authenticator
+    --authn-iam     Starts with authn-iam/prod as authenticator
+    --authn-jwt     Starts with authn-jwt as authenticator
+    --authn-ldap    Starts OpenLDAP server and loads a demo policy to enable 
+                    authentication via:
+                    'curl -X POST -d "alice" http://localhost:3000/authn-ldap/test/cucumber/alice/authenticate'
+    -h, --help      Shows this help message.
+    --identity-user Identity user to create in Conjur
+    --metrics       Starts with the prometheus telemetry features enabled
+    --oidc-adfs     Adds to authn-oidc adfs static env configuration
+    --oidc-identity Starts with authn-oidc/identity as available authenticator.
+                    Must be paired with --identity-user flag.
+    --oidc-keycloak Starts with authn-oidc/keycloak and authn-oidc/keycloak2 as
+                    available authenticators. Service authn-oidc/keycloak uses
+                    AuthnOIDC V1 (based on ID token property validation), and
+                    authn-oidc/keycloak2 uses AuthnOIDC V2 (based on the Authz
+                    Code with PKCE flow).
+    --oidc-okta     Adds to authn-oidc okta static env configuration
+    --rotators      Starts a cucumber and test postgres container.
+                    Drops you into the cucumber container.
+                    You then manually start 'conjurctl server' in another tab.
+EOF
+  exit
+}
+
+parse_options() {
+  while true ; do
+    case "$1" in
+      --audit ) ENABLE_AUDIT=true ; shift ;;
+      --authn-azure ) ENABLE_AUTHN_AZURE=true ; shift ;;
+      --authn-gcp ) ENABLE_AUTHN_GCP=true ; shift ;;
+      --authn-iam ) ENABLE_AUTHN_IAM=true ; shift ;;
+      --authn-jwt ) ENABLE_AUTHN_JWT=true ; ENABLE_OIDC_KEYCLOAK=true ; shift ;;
+      --authn-ldap ) ENABLE_AUTHN_LDAP=true ; shift ;;
+      --metrics ) ENABLE_METRICS=true ; shift ;;
+      -h | --help ) print_help ; shift ;;
+      --identity-user ) IDENTITY_USER="$2" ; shift ; shift ;;
+      --oidc-adfs ) ENABLE_AUTHN_OIDC=true ; ENABLE_OIDC_ADFS=true ; shift ;;
+      --oidc-identity ) ENABLE_AUTHN_OIDC=true ; ENABLE_OIDC_IDENTITY=true; shift ;;
+      --oidc-keycloak ) ENABLE_AUTHN_OIDC=true ; ENABLE_OIDC_KEYCLOAK=true ; shift ;;
+      --oidc-okta ) ENABLE_AUTHN_OIDC=true ; ENABLE_OIDC_OKTA=true ; shift ;;
+      --rotators ) ENABLE_ROTATORS=true ; shift ;;
+       * )
+         if [ -z "$1" ]; then
+           break
+         else
+           echo "$1 is not a valid option"
+           exit 1
+         fi ;;
+    esac
+  done
+
+  if [[ $ENABLE_OIDC_IDENTITY = true && -z "$IDENTITY_USER" ]]; then
+    echo "Flag --oidc-identity must be paired with --identity-user. See --help."
+    exit 1
+  fi
+}
+
+check_env_vars() {
+  envvars=""
+
+  if [[ $ENABLE_OIDC_IDENTITY = true ]]; then
+    envvars="$envvars ${required_envvars[identity]}"
+  fi
+  if [[ $ENABLE_AUTHN_AZURE = true ]]; then
+    envvars="$envvars ${required_envvars[azure]}"
+  fi
+
+  IFS=' ' read -r -a envvars <<< "$envvars"
+
+  envvar_message="Required environment variables not set:"
+  for envvar in "${envvars[@]}"; do
+    if [[ -z "${!envvar}" ]]; then
+      envvar_message="$envvar_message $envvar"
+    fi
+  done
+
+  if [[ "$envvar_message" =~ .*"IDENTITY".* ]]; then
+    echo "$envvar_message"
+    exit 1
+  fi
+}
+
+client_load_policy() {
+  local policy_file=$1
+
+  docker compose exec client \
+    conjur policy load root "$policy_file"
+}
+
+client_add_secret() {
+  local variable=$1
+  local value=$2
+
+  docker compose exec client \
+    conjur variable values add "$variable" "$value"
+}
+
+start_conjur_server() {
+  echo "Starting Conjur server"
+  docker compose exec -d conjur conjurctl server
+
+  echo 'Checking if Conjur server is ready'
+  wait_for_conjur
+}
+
+wait_for_conjur() {
+  api_key=$(
+    docker compose exec -T conjur \
+      conjurctl role retrieve-key cucumber:user:admin | tr -d '\r'
+  )
+
+  docker compose exec -T conjur conjurctl wait
+
+  docker compose exec client conjur authn login -u admin -p "$api_key"
+}
+
+configure_oidc_authenticators() {
+  if [[ $ENABLE_OIDC_KEYCLOAK = true ]]; then
+    setup_keycloak
+  fi
+
+  if [[ $ENABLE_OIDC_OKTA = true ]]; then
+    setup_okta
+  fi
+
+  if [[ $ENABLE_OIDC_ADFS = true ]]; then
+    setup_adfs
+  fi
+
+  if [[ $ENABLE_OIDC_IDENTITY = true ]]; then
+    setup_identity
+  fi
+}
+
+setup_keycloak() {
+
+  pushd "../ci"
+  # CC servers can't find it for some reason.  Local shellcheck is fine.
+  # shellcheck disable=SC1091
+  export COMPOSE="docker compose"
+  source "oauth/keycloak/keycloak_functions.sh"
+  popd
+
+  # Start keycloak docker-compose service
+  services+=(keycloak)
+  docker compose up -d --no-deps "${services[@]}"
+
+  # Start conjur again, since it is recreating by docker compose because of
+  # dependency with keycloak
+  start_conjur_server
+  wait_for_keycloak_server
+
+  fetch_keycloak_certificate
+
+  # Create Conjur AuthnOIDC services and users
+  configure_oidc_v1 \
+    'keycloak' 'https://keycloak:8443/auth/realms/master' \
+    'preferred_username' 'ci/test_suites/authenticators_oidc/policy.yml'
+  configure_oidc_v2 \
+    'keycloak2' 'https://keycloak:8443/auth/realms/master' \
+    'conjurClient' '1234' 'email'
+
+  # Create users in Keycloak
+  create_keycloak_users
+
+  echo "keycloak admin console url: http://0.0.0.0:7777/auth/admin"
+}
+
+setup_okta() {
+  configure_oidc_v2 \
+    'okta-2' 'https://dev-92899796.okta.com/oauth2/default' \
+    '0oa3w3xig6rHiu9yT5d7' 'e349BMTTIpLO-rPuPqLLkLyH_pO-loUzhIVJCrHj' \
+    'preferred_username'
+}
+
+setup_adfs() {
+  echo "Initialize ADFS certificate in conjur server"
+  docker compose exec conjur \
+    /src/conjur-server/dev/files/authn-oidc/adfs/fetchCertificate
+
+  configure_oidc_v1 \
+    'adfs' 'https://adfs4win2016.northeurope.cloudapp.azure.com' \
+    'unique_name' 'ci/authn-oidc/policy_adfs.yml'
+}
+
+setup_identity() {
+  policy_dir="policies/authenticators/authn-oidc"
+  rm -f "$policy_dir/identity-users.yml"
+  sed -e "s#{{ IDENTITY_USER }}#$IDENTITY_USER#g" "$policy_dir/identity-users.template.yml" > "$policy_dir/identity-users.yml"
+
+  configure_oidc_v2 \
+    'identity' "$IDENTITY_PROVIDER_URI" \
+    "$IDENTITY_CLIENT_ID" "$IDENTITY_CLIENT_SECRET" \
+    'email'
+}
+
+configure_oidc_v1() {
+  service_id="$1"
+  provider_uri="$2"
+  token_property="$3"
+  policy_path="$4"
+
+  client_load_policy "/src/conjur-server/$policy_path"
+  client_add_secret "conjur/authn-oidc/$service_id/provider-uri" "$provider_uri"
+  client_add_secret "conjur/authn-oidc/$service_id/id-token-user-property" "$token_property"
+  if [ "$service_id" = "keycloak" ]; then
+    client_add_secret "conjur/authn-oidc/$service_id/ca-cert" "$($COMPOSE exec conjur cat /etc/ssl/certs/keycloak.pem)"
+  fi
+}
+
+configure_oidc_v2() {
+  service_id="$1"
+  provider_uri="$2"
+  client_id="$3"
+  client_secret="$4"
+  claim_mapping="$5"
+
+  client_load_policy "/src/conjur-server/dev/policies/authenticators/authn-oidc/$service_id.yml"
+  client_add_secret "conjur/authn-oidc/$service_id/provider-uri" "$provider_uri"
+  client_add_secret "conjur/authn-oidc/$service_id/client-id" "$client_id"
+  client_add_secret "conjur/authn-oidc/$service_id/client-secret" "$client_secret"
+  client_add_secret "conjur/authn-oidc/$service_id/claim-mapping" "$claim_mapping"
+  client_add_secret "conjur/authn-oidc/$service_id/redirect_uri" "http://localhost:3000/authn-oidc/$service_id/cucumber/authenticate"
+  if [ "$service_id" = "keycloak2" ]; then
+    client_add_secret "conjur/authn-oidc/$service_id/ca-cert" "$($COMPOSE exec conjur cat /etc/ssl/certs/keycloak.pem)"
+    # Delete the symlink so we can test with the 'ca-cert' variable
+    hash=$($COMPOSE exec conjur openssl x509 -hash -in /etc/ssl/certs/keycloak.pem --noout)
+    $COMPOSE exec conjur rm "/etc/ssl/certs/$hash.0" || true
+  fi
+
+  client_load_policy "/src/conjur-server/dev/policies/authenticators/authn-oidc/$service_id-users.yml"
+}
+
+enable_oidc_authenticators() {
+  if [[ $ENABLE_OIDC_KEYCLOAK = true ]]; then
+    echo "Configuring Keycloak as OpenID provider for manual testing"
+    # We enable an OIDC authenticator without a service-id to test that it's
+    # invalid.
+    enabled_authenticators="$enabled_authenticators,authn-oidc/keycloak,authn-oidc,authn-oidc/keycloak2"
+  fi
+
+  if [[ $ENABLE_OIDC_OKTA = true ]]; then
+    echo "Configuring OKTA as OpenID provider for manual testing"
+    enabled_authenticators="$enabled_authenticators,authn-oidc/okta,authn-oidc/okta-2"
+  fi
+
+  if [[ $ENABLE_OIDC_ADFS = true ]]; then
+    echo "Configuring ADFS as OpenID provider for manual testing"
+    enabled_authenticators="$enabled_authenticators,authn-oidc/adfs"
+  fi
+
+  if [[ $ENABLE_OIDC_IDENTITY = true ]]; then
+    echo "Configuring Identity as OpenID provider for manual testing"
+    enabled_authenticators="$enabled_authenticators,authn-oidc/identity"
+  fi
+}
+
+init_data_key() {
+  if [ ! -f data_key ]; then
+    echo "Generating data key"
+    openssl rand -base64 32 > data_key
+  fi
+
+  export CONJUR_DATA_KEY
+  CONJUR_DATA_KEY="$(cat data_key)"
+}
+
+init_audit_service() {
+  if [[ $ENABLE_AUDIT == true ]]; then
+    services+=(audit)
+    export AUDIT_DATABASE_URL=postgres://postgres@audit
+  fi
+}
+
+migrate_audit_db() {
+  if [[ $ENABLE_AUDIT != true ]]; then
+    return
+  fi
+
+  # Run database migration to create audit database schema.
+  #
+  # SC2016: We want docker compose to expand $AUDIT_DATABASE_URL.
+  # SC1004: Literal backslash will be interpreted away by bash.
+  # shellcheck disable=SC2016,SC1004
+  docker compose exec -T conjur bash -c '
+  BUNDLE_GEMFILE=/src/conjur-server/Gemfile \
+    bundle exec sequel $AUDIT_DATABASE_URL \
+    -E -m /src/conjur-server/engines/conjur_audit/db/migrate/
+  '
+}
+
+init_ldap() {
+  if [[ $ENABLE_AUTHN_LDAP != true ]]; then
+    return
+  fi
+
+  services+=(ldap-server)
+  env_args+=(-e "LDAP_URI=ldap://ldap-server:389")
+  env_args+=(-e "LDAP_BASE=dc=conjur,dc=net")
+  env_args+=(-e "LDAP_FILTER=(uid=%s)")
+  env_args+=(-e "LDAP_BINDDN=cn=admin,dc=conjur,dc=net")
+  env_args+=(-e "LDAP_BINDPW=ldapsecret")
+
+  enabled_authenticators="$enabled_authenticators,authn-ldap/test,authn-ldap/secure"
+
+  # Using conjur policy load doesn't work here (not sure why).
+  docker compose exec conjur \
+    conjurctl policy load cucumber \
+    "/src/conjur-server/dev/files/authn-ldap/policy.yml"
+}
+
+init_azure() {
+  if [[ $ENABLE_AUTHN_AZURE != true ]]; then
+    return
+  fi
+
+  enabled_authenticators="$enabled_authenticators,authn-azure/prod"
+
+  ../ci/authn-azure/check_dependencies.sh
+
+  client_load_policy \
+    "/src/conjur-server/ci/test_suites/authenticators_azure/policies/policy.yml"
+
+  docker compose exec client \
+    conjur variable values add \
+    conjur/authn-azure/prod/provider-uri "https://sts.windows.net/$AZURE_TENANT_ID/"
+
+  # Create host policy from template.
+  sed "s#{{ AZURE_SUBSCRIPTION_ID }}#$AZURE_SUBSCRIPTION_ID#g" \
+    "../ci/authn-azure/policies/azure-hosts.template.yml" |
+    sed "s#{{ AZURE_RESOURCE_GROUP }}#$AZURE_RESOURCE_GROUP#g" > \
+    "../ci/authn-azure/policies/azure-hosts.yml"
+
+  client_load_policy \
+    "/src/conjur-server/ci/authn-azure/policies/azure-hosts.yml"
+
+  client_load_policy \
+    "/src/conjur-server/ci/authn-azure/policies/azure-operators.yml"
+}
+
+init_gcp() {
+  if [[ $ENABLE_AUTHN_GCP = true ]]; then
+    enabled_authenticators="$enabled_authenticators,authn-gcp"
+  fi
+}
+
+init_jwt() {
+  if [[ $ENABLE_AUTHN_JWT != true ]]; then
+    return
+  fi
+
+  enabled_authenticators="$enabled_authenticators,authn-jwt/raw,authn-jwt/keycloak"
+  services+=(jwks jwks_py keycloak)
+  docker compose up -d --no-deps "${services[@]}"
+
+  # OIDC is a special case on JWT, JWT automation tests contain scenarios with
+  # OIDC providers.
+  configure_oidc_authenticators
+  enable_oidc_authenticators
+
+  echo "Configure jwks provider"
+  docker compose exec jwks "/tmp/create_nginx_certificate.sh"
+}
+
+init_oidc() {
+  if [[ $ENABLE_AUTHN_OIDC != true ]]; then
+    return
+  fi
+
+  configure_oidc_authenticators
+  enable_oidc_authenticators
+
+  if [[ $ENABLE_AUTHN_LDAP = true && $ENABLE_OIDC_OKTA = true ]]; then
+    echo "Building & configuring Okta-LDAP agent"
+    services+=(okta-ldap-agent)
+    docker compose up -d --no-deps "${services[@]}"
+
+    echo "Starting Okta agent service"
+    docker exec "$(docker compose ps -q okta-ldap-agent)" \
+      "/opt/Okta/OktaLDAPAgent/scripts/OktaLDAPAgent"
+  fi
+}
+
+init_rotators() {
+  if [[ $ENABLE_ROTATORS != true ]]; then
+    return
+  fi
+
+  services+=(testdb cucumber)
+}
+
+init_iam() {
+  if [[ $ENABLE_AUTHN_IAM != true ]]; then
+    return
+  fi
+  enabled_authenticators="$enabled_authenticators,authn-iam/prod"
+
+  # Using conjur policy load doesn't work here (not sure why).
+  docker compose exec conjur \
+    conjurctl policy load cucumber \
+    "/src/conjur-server/dev/files/authn-iam/policy.yml"
+}
+
+init_metrics() {
+  if [[ $ENABLE_METRICS != true ]]; then
+    return
+  fi
+  env_args+=(-e "CONJUR_TELEMETRY_ENABLED=true")
+  services+=(prometheus node-exporter)
+}
+
+start_auth_services() {
+  echo "Setting CONJUR_AUTHENTICATORS to: $enabled_authenticators"
+  env_args+=(-e "CONJUR_AUTHENTICATORS=$enabled_authenticators")
+
+  # Will restart services if configuration has changed.  I think this happens
+  # when additional authenticators are enabled.
+  docker compose up -d --no-deps "${services[@]}"
+
+  # If that happens, we need to restart Conjur server.
+  if [[ "$enabled_authenticators" != "$default_authenticators" ]]; then
+    start_conjur_server
+  fi
+}
+
+create_alice() {
+  echo "Creating user alice"
+  client_load_policy "/src/conjur-server/dev/files/policy.yml"
+}
+
+kill_conjur() {
+  echo "killing the conjur server process"
+  docker compose exec conjur /src/conjur-server/dev/files/killConjurServer
+}
+
+enter_container() {
+  env_args+=(-e "CONJUR_AUTHN_API_KEY=$api_key")
+  docker exec "${env_args[@]}" -it --detach-keys ctrl-\\ \
+    "$(docker compose ps -q conjur)" bash
+}
+
+main "$@"

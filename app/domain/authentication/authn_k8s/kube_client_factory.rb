@@ -1,0 +1,32 @@
+# frozen_string_literal: true
+
+require 'kubeclient'
+require 'uri'
+
+# TODO: make it class that accepts env, so the validation is only done once
+# That is, this is a really an object whose ctor dependency is ENV, and
+# where the validation is done at construction.  `client` then becomes
+# a method on that constructed object
+#
+module Authentication
+  module AuthnK8s
+
+    module KubeClientFactory
+
+      def self.client(api: 'api', version: 'v1', host_url: nil, options: nil)
+        begin
+          url = URI.parse(host_url)
+          raise if url.host.empty?
+
+          url.path = url.path.chomp("/") + "/#{api}"
+
+          full_url = url.to_s
+        rescue
+          raise Errors::Authentication::AuthnK8s::InvalidApiUrl, host_url
+        end
+
+        Kubeclient::Client.new(full_url, version, **options)
+      end
+    end
+  end
+end
