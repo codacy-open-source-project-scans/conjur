@@ -49,7 +49,7 @@ A policy can be reloaded using the --replace flag
     """
     Then there's an error
     And the error code is "not_found"
-    And the error message is "Role cucumber:group:developers does not exist"
+    And the error message is "Group 'developers' not found in account 'cucumber'"
 
   @negative @acceptance
   Scenario: Policy reload fails when group isn't defined in new policy
@@ -86,7 +86,7 @@ A policy can be reloaded using the --replace flag
     """
     Then there's an error
     And the error code is "not_found"
-    And the error message is "Role cucumber:group:security-admin does not exist"
+    And the error message is "Group 'security-admin' not found in account 'cucumber'"
 
   @smoke
   Scenario: Removing variable declaration from policy deletes its value
@@ -252,3 +252,100 @@ A policy can be reloaded using the --replace flag
     Then user "developer1" does not exist
     And I show the group "developers"
     Then user "developer1" is not a role member
+
+  @negative @acceptance
+  Scenario: Loading a policy that references a removed resource produces a Not Found exception
+
+    Given I load a policy:
+    """
+    - !host jenkins-ops-secrets
+
+    - !layer ops
+
+    - !permit
+      role: !host jenkins-ops-secrets
+      privileges:
+        - read
+        - execute 
+      resource: !layer ops
+    """
+    When I replace the "root" policy with:
+    """
+    - !host jenkins-ops-secrets
+
+    - !permit
+      role: !host jenkins-ops-secrets
+      privileges:
+        - read
+        - execute
+      resource: !layer ops
+    """
+    Then there's an error
+    And the error code is "not_found"
+    And the error message is "Layer 'ops' not found in account 'cucumber'"
+
+  @acceptance
+  Scenario: Update the policy with a policy that contains not yet existing element
+
+    Given I load a policy:
+    """
+    - !policy
+      id: testpolicy
+      body:
+        - !policy
+          id: testsubpolicy
+          owner: !host testhost
+        - !host
+          id: testhost
+    """
+    And I update the policy with:
+    """
+    - !policy
+      id: testpolicy
+      body:
+        - !host
+          id: testhost
+        - !group
+          id: testgroup
+        - !grant
+          role: !group testgroup
+          member: !host testhost
+        - !policy
+          id: testsubpolicy
+          owner: !group testgroup
+    """
+    When I list group resources
+    Then the resource list includes group "testpolicy/testgroup"
+
+  @acceptance
+  Scenario: Replace the policy with a policy that contains not yet existing element
+
+    Given I load a policy:
+    """
+    - !policy
+      id: testpolicy
+      body:
+        - !policy
+          id: testsubpolicy
+          owner: !host testhost
+        - !host
+          id: testhost
+    """
+    And I replace the "root" policy with:
+    """
+    - !policy
+      id: testpolicy
+      body:
+        - !host
+          id: testhost
+        - !group
+          id: testgroup
+        - !grant
+          role: !group testgroup
+          member: !host testhost
+        - !policy
+          id: testsubpolicy
+          owner: !group testgroup
+    """
+    When I list group resources
+    Then the resource list includes group "testpolicy/testgroup"

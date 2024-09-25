@@ -19,9 +19,9 @@ gem 'http', '~> 4.2.0'
 gem 'iso8601'
 gem 'jbuilder', '~> 2.7.0'
 gem 'nokogiri', '>= 1.8.2'
-gem 'puma', '~> 6'
-gem 'rack', '~> 2.2'
-gem 'rails', '~> 6.1', '>= 6.1.4.6'
+gem 'puma', '~> 6', '>= 6.4.2'
+gem 'rack', '~> 2.2', '>= 2.2.8.1'
+gem 'rails', '~> 6.1', '>= 6.1.7.8'
 gem 'rake'
 
 gem 'pg'
@@ -55,6 +55,7 @@ gem 'rack-rewrite'
 
 gem 'dry-struct'
 gem 'dry-types'
+gem 'dry-validation'
 gem 'net-ldap'
 
 # for AWS rotator
@@ -92,7 +93,7 @@ group :development, :test do
   gem 'cucumber', '~> 7.1'
   gem 'database_cleaner', '~> 1.8'
   gem 'debase', '~> 0.2.5.beta2'
-  gem 'debase-ruby_core_source', '~> 3.2.1'
+  gem 'debase-ruby_core_source', '~> 3.3'
   gem 'json_spec', '~> 1.1'
   gem 'faye-websocket'
   gem 'net-ssh'
@@ -106,7 +107,7 @@ group :development, :test do
   gem 'rspec'
   gem 'rspec-core'
   gem 'rspec-rails'
-  # gem 'ruby-debug-ide'
+  gem 'ruby-debug-ide'
 
   # We use a post-coverage hook to sleep covered processes until we're ready to
   # collect the coverage reports in CI. Because of this, we don't want bundler

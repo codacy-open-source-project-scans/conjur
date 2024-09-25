@@ -161,6 +161,11 @@ module Errors
         code: "CONJ00006E"
       )
 
+      RoleNotAuthorizedOnPolicyDescendants = ::Util::TrackableErrorClass.new(
+        msg: "'{0-role-name}' does not have '{1-privilege}' privilege on some children of {2-policy-name}",
+        code: "CONJ00136E"
+      )
+
       RoleNotFound = ::Util::TrackableErrorClass.new(
         msg: "'{0-role-name}' not found",
         code: "CONJ00007E"
@@ -169,11 +174,6 @@ module Errors
       AccountNotDefined = ::Util::TrackableErrorClass.new(
         msg: "Account '{0-account-name}' is not defined in Conjur",
         code: "CONJ00008E"
-      )
-
-      MultipleRoleMatchesFound = ::Util::TrackableErrorClass.new(
-        msg: "'{0-role}' matched multiple roles",
-        code: "CONJ00009E"
       )
     end
 
@@ -269,6 +269,11 @@ module Errors
       InvalidCertificate = ::Util::TrackableErrorClass.new(
         msg: "Invalid certificate: {0-message}",
         code: "CONJ00135E"
+      )
+
+      NonceVerificationFailed = ::Util::TrackableErrorClass.new(
+        msg: "Provided nonce does not match the returned nonce",
+        code: 'CONJ00153E'
       )
     end
 
@@ -418,6 +423,26 @@ module Errors
       NoMatchingClient = ::Util::TrackableErrorClass.new(
         msg: "Unable to establish Kubernetes client to execute method: \#{0}",
         code: "CONJ00132E"
+      )
+
+      InvalidServiceAccountToken = ::Util::TrackableErrorClass.new(
+        msg: "Invalid service account token: {0}",
+        code: "CONJ00153E"
+      )
+
+      InvalidApiCert = ::Util::TrackableErrorClass.new(
+        msg: "Invalid Kubernetes API CA certificate: {0}",
+        code: "CONJ00154E"
+      )
+
+      InvalidSigningCert = ::Util::TrackableErrorClass.new(
+        msg: "Invalid signing certificate: {0}",
+        code: "CONJ00155E"
+      )
+
+      InvalidSigningKey = ::Util::TrackableErrorClass.new(
+        msg: "Invalid signing key: {0}",
+        code: "CONJ00156E"
       )
     end
 
@@ -749,6 +774,51 @@ module Errors
     InvalidOrMissingMetricType = ::Util::TrackableErrorClass.new(
       msg: "Invalid or missing metric type: {0-metric-type}",
       code: "CONJ00152E"
+    )
+  end
+
+  module Factories
+
+    FactoryNotFound = ::Util::TrackableErrorClass.new(
+      msg: "No Factory found for '{0-factory-name}'",
+      code: 'CONJ00157E'
+    )
+
+    FactoryGeneratedPolicyNotFound = ::Util::TrackableErrorClass.new(
+      msg: "No policy found for Factory generated resource: '{0-policy-identifier}'",
+      code: 'CONJ00158E'
+    )
+
+    MissingFactoryAnnotation = ::Util::TrackableErrorClass.new(
+      msg: "No factory annotation found for policy: '{0-policy-identifier}'",
+      code: 'CONJ00159E'
+    )
+
+    InvalidAction = ::Util::TrackableErrorClass.new(
+      msg: "Invalid action: '{0-action}', only {1-allowed} are allowed",
+      code: 'CONJ00160E'
+    )
+
+    NoVariablesFound = ::Util::TrackableErrorClass.new(
+      msg: "No variables found for Factory created resource: '{0-policy-path}'",
+      code: 'CONJ00161E'
+    )
+  end
+
+  module EffectivePolicy
+    NumberParamError = ::Util::TrackableErrorClass.new(
+      msg: "Param '{0-name}' is '{1-value}' but should be a number from {2-min} up to {3-max}",
+      code: 'CONJ00163E'
+    )
+
+    PolicySizeExceeded = ::Util::TrackableErrorClass.new(
+      msg: "Policy max allowed '{0-name}' = {1-max} exceeded. Value for policy is: {2-value}",
+      code: 'CONJ00164E'
+    )
+
+    PathParamError = ::Util::TrackableErrorClass.new(
+      msg: "Unsupported kind '{0-name}'. Only 'policy' is allowed.",
+      code: 'CONJ00165E'
     )
   end
 end

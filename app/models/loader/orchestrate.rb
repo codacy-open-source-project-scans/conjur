@@ -15,6 +15,7 @@ require 'conjur/extension/repository'
 #
 # 2) Records which are defined in some other policy in the primary schema, are removed from the "new" policy.
 # This prevents the "new" policy from attempting to create or update records which are already owned by another policy.
+
 # In the future, this might be reported as an error or warning.
 #
 # 3) Records which are identical in the "old" and "new" policy are deleted from the "new" policy, so they will not be
@@ -59,7 +60,7 @@ module Loader
     include Handlers::Password
     include Handlers::PublicKey
 
-    attr_reader :policy_version, :create_records, :delete_records, :new_roles, :schemata
+    attr_reader :policy_parse, :policy_version, :create_records, :delete_records, :new_roles, :schemata
 
     TABLES = %i[roles role_memberships resources permissions annotations]
 
@@ -73,10 +74,14 @@ module Loader
     }
 
     def initialize(
-      policy_version,
+      policy_parse:,
+      policy_version:,
       extension_repository: Conjur::Extension::Repository.new,
-      feature_flags: Rails.application.config.feature_flags
+      feature_flags: Rails.application.config.feature_flags,
+      logger: Rails.logger
     )
+      @logger = logger
+      @policy_parse = policy_parse
       @policy_version = policy_version
       @schemata = Schemata.new
       @feature_flags = feature_flags
@@ -88,10 +93,10 @@ module Loader
         end
 
       # Transform each statement into a Loader type
-      @create_records = policy_version.create_records.map do |policy_object|
+      @create_records = policy_parse.create_records.map do |policy_object|
         Loader::Types.wrap(policy_object, self)
       end
-      @delete_records = policy_version.delete_records.map do |policy_object|
+      @delete_records = policy_parse.delete_records.map do |policy_object|
         Loader::Types.wrap(policy_object, self)
       end
     end
@@ -108,7 +113,6 @@ module Loader
       end
 
       create_schema
-
       load_records
     end
 
@@ -134,6 +138,133 @@ module Loader
       store_public_keys
 
       store_restricted_to
+    end
+
+    def stash_new_roles
+      pk_columns = Array(Sequel::Model(:roles).primary_key)
+      pk_columns_with_policy_id = pk_columns + [ :policy_id ]
+      join_columns = pk_columns_with_policy_id.map do |c|
+        "public_roles.#{c} = new_roles.#{c}"
+      end.join(" AND ")
+
+      # getting newly added roles
+      new_roles_sql = <<-SQL
+          SELECT * 
+          FROM #{schema_name}.roles new_roles
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM #{primary_schema}.roles public_roles
+            WHERE ( #{join_columns} ) 
+          );
+      SQL
+
+      new_roles_dataset = db.fetch(new_roles_sql)
+      @new_roles = new_roles_dataset.map{ |ds| Role.new(ds) }
+    end
+
+    def upsert_policy_records
+      if @feature_flags.enabled?(:policy_load_extensions)
+        @extensions.call(
+          :before_insert,
+          policy_version: @policy_version,
+          schema_name: schema_name
+        )
+        @extensions.call(
+          :before_update,
+          policy_version: @policy_version,
+          schema_name: schema_name
+        )
+      end
+
+      # We need to get newly created roles and save them in the class field before further changes.
+      # This is the last place we can do it.
+      stash_new_roles
+
+      in_primary_schema do
+        TABLES.each do |table|
+          # Preparation for moving newly added entries from temporary
+          # schema to the public schema
+          pk_columns = Array(Sequel::Model(table).primary_key)
+          pk_columns_with_policy_id = pk_columns + [ :policy_id ]
+
+          join_columns = pk_columns_with_policy_id.map do |c|
+            "#{table}.#{c} = new_#{table}.#{c}"
+          end.join(" AND ")
+          insert_columns = (TABLE_EQUIVALENCE_COLUMNS[table] + [ :policy_id ]).join(", ")
+
+          # Preparing columns to be used during update.
+          # Value for policy_id will not be changed during update
+          # but for readability (one generic flow) and consistency with the rest of the code
+          # we are using list of columns with policy_id
+          update_columns = TABLE_EQUIVALENCE_COLUMNS[table] - pk_columns + [:policy_id]
+          update_statements = update_columns.map do |c|
+            "#{c} = new_#{table}.#{c}"
+          end.join(", ")
+
+          db.execute(<<-UPSERT)
+            WITH inserted AS (
+              INSERT INTO #{table} (#{insert_columns})
+              SELECT #{insert_columns}
+              FROM #{schema_name}.#{table} new_#{table}
+              ON CONFLICT (#{pk_columns.join(', ')}) DO NOTHING
+              RETURNING #{pk_columns.join(', ')}
+            )
+            UPDATE #{table}
+            SET #{update_statements}
+            FROM #{schema_name}.#{table} new_#{table}
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM inserted i
+              WHERE #{pk_columns.map do |c|
+                "i.#{c} = #{table}.#{c}"
+              end.join(' AND ')}
+            ) AND #{join_columns}
+          UPSERT
+        end
+      end
+
+      # We want to use the if statement here to wrap the feature flag check
+      # rubocop:disable Style/GuardClause
+      if @feature_flags.enabled?(:policy_load_extensions)
+        @extensions.call(
+          :after_insert,
+          policy_version: @policy_version,
+          schema_name: schema_name
+        )
+        @extensions.call(
+          :after_update,
+          policy_version: @policy_version,
+          schema_name: schema_name
+        )
+      end
+
+      # rubocop:enable Style/GuardClause
+    end
+
+    def clean_db
+      drop_schema
+
+      perform_deletion
+    end
+
+    def store_auxiliary_data
+      store_passwords
+
+      store_public_keys
+
+      store_restricted_to
+    end
+
+    def snapshot_public_schema_before
+      # No-op.
+    end
+
+    def drop_snapshot_public_schema_before
+      # No-op.
+    end
+
+    def get_diff
+      # No-op.
     end
 
     def table_data schema = ""
@@ -325,9 +456,7 @@ module Loader
       @new_roles = ::Role.all
 
       in_primary_schema do
-        disable_policy_log_trigger
         TABLES.each { |table| insert_table_records(table) }
-        enable_policy_log_trigger
       end
 
       # We want to use the if statement here to wrap the feature flag check
@@ -345,46 +474,6 @@ module Loader
     def insert_table_records(table)
       columns = (TABLE_EQUIVALENCE_COLUMNS[table] + [ :policy_id ]).join(", ")
       db.run("INSERT INTO #{table} ( #{columns} ) SELECT #{columns} FROM #{schema_name}.#{table}")
-
-      # For large policies, the policy logging triggers occupy the majority
-      # of the policy load time. To make this more efficient on the initial
-      # load, we disable the triggers and update the policy log in bulk.
-      insert_policy_log_records(table)
-    end
-
-    def disable_policy_log_trigger
-      # To disable the triggers during the bulk load we use a local
-      # configuration setting that the trigger function is aware of.
-      # When we set this variable to `true`, then the trigger will
-      # observe the setting value and skip its own policy log.
-      db.run('SET LOCAL conjur.skip_insert_policy_log_trigger = true')
-    end
-
-    def enable_policy_log_trigger
-      db.run('SET LOCAL conjur.skip_insert_policy_log_trigger = false')
-    end
-
-    def insert_policy_log_records(table)
-      primary_key_columns = Array(Sequel::Model(table).primary_key).map(&:to_s).pg_array
-      db.run(<<-POLICY_LOG)
-          INSERT INTO policy_log(
-            policy_id,
-            version,
-            operation,
-            kind,
-            subject)
-          SELECT
-          (policy_log_record(
-            '#{table}',
-            #{db.literal(primary_key_columns)},
-            hstore(#{table}),
-            #{db.literal(policy_id)},
-            #{db.literal(policy_version[:version])},
-            'INSERT'
-            )).*
-          FROM
-          #{schema_name}.#{table}
-      POLICY_LOG
     end
 
     # A random schema name.
@@ -518,6 +607,44 @@ module Loader
     def release_db_connection
       Sequel::Model.db.disconnect
     end
+
+    def actor_roles(roles)
+      roles.select do |role|
+        %w[user host].member?(role.kind)
+      end
+    end
+
+    def credential_roles(actor_roles)
+      actor_roles.each_with_object({}) do |role, memo|
+        credentials = Credentials[role: role] || Credentials.create(role: role)
+        role_id = role.id
+        memo[role_id] = { id: role_id, api_key: credentials.api_key }
+      end
+    end
+
+    def report(policy_result)
+      error = policy_result.error
+
+      if error
+        # The failure report identifies the error
+        @logger.debug("#{error}\n")
+
+        response = {
+          error: error
+        }
+
+      else
+        # The success report lists the roles
+        response = {
+          created_roles: policy_result.created_roles,
+          version: @policy_version[:version]
+        }
+
+      end
+
+      response
+    end
+
   end
   # rubocop:enable Metrics/ClassLength
 end

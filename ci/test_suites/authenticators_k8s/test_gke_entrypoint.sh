@@ -54,10 +54,10 @@ function finish {
       cat output/gke-authn-k8s-logs.txt
       echo "==========================="
 
-      echo "Killing conjur so that coverage report is written"
-      # The container is kept alive using an infinite sleep in the at_exit hook
-      # (see .simplecov) so that the kubectl cp below works.
-      kubectl exec "${conjur_pod_name}" -- bash -c "pkill -f 'puma 6'"
+      echo "Generating conjur coverage report"
+      # SimpleCov will listen on the /tmp/simplecov.sock socket for a 'generate_report' command and block until the
+      # report is generated. The report will be written to /opt/conjur-server/coverage/.resultset.json
+      kubectl exec "${conjur_pod_name}" -- bash -c "echo 'generate_report' | nc -U /tmp/simplecov.sock"
 
       echo "Retrieving coverage report"
       kubectl cp \
@@ -210,6 +210,11 @@ function launchConjurMaster() {
       conjurctl account create cucumber | tail -n 1 | awk '{ print $NF }'
   )
   export API_KEY
+
+  # Write the API key to a file in the Cucumber runner pod so that the test
+  # steps can use it to perform API operations as the Conjur admin.
+  kubectl exec "$(retrieve_pod cucumber-authn-k8s)" -- \
+    bash -c "echo \"${API_KEY}\" > /run/conjur_api_key"
 }
 
 function copyNginxSSLCert() {
@@ -226,7 +231,11 @@ function copyConjurPolicies() {
   cli_pod=$(retrieve_pod conjur-cli)
   kubectl wait --for=condition=Ready "pod/$cli_pod" --timeout=5m
 
-  kubectl cp ./dev/policies "$cli_pod:/policies"
+  # Avoid using kubectl cp because it requires the `tar` command to be
+  # installed on the source and destination pods. Instead, use `kubectl exec`
+  # to write the policy file to the destination pod.
+  kubectl exec "$cli_pod" -- mkdir /policies
+  kubectl exec -i "$cli_pod" -- sh -c "cat - > /policies/policy.${TEMPLATE_TAG}yml" < ./dev/policies/policy.${TEMPLATE_TAG}yml
 }
 
 function loadConjurPolicies() {
@@ -235,18 +244,18 @@ function loadConjurPolicies() {
   # kubectl wait not needed -- already done in copyConjurPolicies.
   cli_pod=$(retrieve_pod conjur-cli)
 
-  kubectl exec "$cli_pod" -- conjur init -u conjur -a cucumber
+  kubectl exec "$cli_pod" -- conjur init --insecure --url conjur --account cucumber
   sleep 5
-  kubectl exec "$cli_pod" -- conjur authn login -u admin -p "$API_KEY"
+  kubectl exec "$cli_pod" -- conjur login --id admin --password "$API_KEY"
 
   # load policies
   wait_for_it 300 "kubectl exec $cli_pod -- \
-    conjur policy load root /policies/policy.${TEMPLATE_TAG}yml"
+    conjur policy load --branch root --file /policies/policy.${TEMPLATE_TAG}yml"
 
   # init ca certs
   # kubectl wait not needed -- already done in launchConjurMaster.
   kubectl exec "$(retrieve_pod conjur-authn-k8s)" -- \
-    rake authn_k8s:ca_init["conjur/authn-k8s/minikube"]
+    bundle exec rake authn_k8s:ca_init["conjur/authn-k8s/minikube"]
 }
 
 function launchInventoryServices() {
@@ -276,12 +285,12 @@ function runTests() {
 
   conjurcmd mkdir -p /opt/conjur-server/output
 
-  # THE CUCUMBER_FILTER_TAGS environment variable is not natively
+  # THE INFRAPOOL_CUCUMBER_FILTER_TAGS environment variable is not natively
   # implemented in cucumber-ruby, so we pass it as a CLI argument
   # if the variable is set.
   local cucumber_tags_arg
-  if [[ -n "$CUCUMBER_FILTER_TAGS" ]]; then
-    cucumber_tags_arg="--tags \"$CUCUMBER_FILTER_TAGS\""
+  if [[ -n "$INFRAPOOL_CUCUMBER_FILTER_TAGS" ]]; then
+    cucumber_tags_arg="--tags \"$INFRAPOOL_CUCUMBER_FILTER_TAGS\""
   fi
 
   # Run standard k8s authenticator tests

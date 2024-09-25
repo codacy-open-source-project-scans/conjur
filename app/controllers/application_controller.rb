@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'exceptions/enhanced_policy'
+
 class ApplicationController < ActionController::API
   include Authenticates
   include ::ActionView::Layouts
@@ -47,6 +49,7 @@ class ApplicationController < ActionController::API
   rescue_from Errors::Conjur::MissingSecretValue, with: :render_secret_not_found
   rescue_from Exceptions::RecordExists, with: :record_exists
   rescue_from Exceptions::Forbidden, with: :forbidden
+  rescue_from PG::InsufficientPrivilege, with: :not_allowed
   rescue_from BadRequest, with: :bad_request
   rescue_from Unauthorized, with: :unauthorized
   rescue_from InternalServerError, with: :internal_server_error
@@ -57,8 +60,11 @@ class ApplicationController < ActionController::API
   rescue_from Sequel::ValidationFailed, with: :validation_failed
   rescue_from Sequel::NoMatchingRow, with: :no_matching_row
   rescue_from Sequel::ForeignKeyConstraintViolation, with: :foreign_key_constraint_violation
-  rescue_from Conjur::PolicyParser::Invalid, with: :policy_invalid
+  rescue_from Exceptions::EnhancedPolicyError, with: :enhanced_policy_error
   rescue_from Exceptions::InvalidPolicyObject, with: :policy_invalid
+  rescue_from Conjur::PolicyParser::Invalid, with: :policy_invalid
+  rescue_from Conjur::PolicyParser::ResolverError, with: :policy_invalid
+  rescue_from NoMethodError, with: :validation_failed
   rescue_from ArgumentError, with: :argument_error
   rescue_from ActionController::ParameterMissing, with: :argument_error
   rescue_from UnprocessableEntity, with: :unprocessable_entity
@@ -118,30 +124,18 @@ class ApplicationController < ActionController::API
   def foreign_key_constraint_violation e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
 
-    # check if this is a violation of role_memberships_member_id_fkey
-    # or role_memberships_role_id_fkey
-    # sample exceptions:
-    # PG::ForeignKeyViolation: ERROR:  insert or update on table "role_memberships" violates foreign key constraint "role_memberships_member_id_fkey"
-    # DETAIL:  Key (member_id)=(cucumber:group:security-admin) is not present in table "roles".
-    # or
-    # PG::ForeignKeyViolation: ERROR:  insert or update on table "role_memberships" violates foreign key constraint "role_memberships_role_id_fkey"
-    # DETAIL:  Key (role_id)=(cucumber:group:developers) is not present in table "roles".
-    if e.message.index(/role_memberships_member_id_fkey/) ||
-      e.message.index(/role_memberships_role_id_fkey/)
+    # Check if a foreign key constraint violation is specifically a missing record, and handle it accordingly
+    #
+    # Here's a sample exception:
+    # <Sequel::ForeignKeyConstraintViolation: PG::ForeignKeyViolation: ERROR:  insert or update on table "permissions" violates foreign key constraint "permissions_resource_id_fkey"
+    # DETAIL:  Key (resource_id)=(myConjurAccount:layer:ops) is not present in table "resources".
+    # >
+    if e.is_a?(Sequel::ForeignKeyConstraintViolation) &&
+      e.cause.is_a?(PG::ForeignKeyViolation) &&
+      (e.cause.result.error_field(PG::PG_DIAG_MESSAGE_DETAIL) =~ /Key \(([^)]+)\)=\(([^)]+)\) is not present in table "([^"]+)"/  rescue false)
+      violating_key = $2
 
-      key_string = ''
-      e.message.split(" ").map do |text|
-        if text["(member_id)"] || text["(role_id)"]
-          key_string = text
-          break
-        end
-      end
-
-      # the member ID is inside the second set of parentheses of the key_string
-      key_index = key_string.index(/\(/, 1) + 1
-      key = key_string[key_index, key_string.length - key_index - 1]
-
-      exc = Exceptions::RecordNotFound.new(key, message: "Role #{key} does not exist")
+      exc = Exceptions::RecordNotFound.new(violating_key)
       render_record_not_found(exc)
     else
       # if this isn't a case we're handling yet, let the exception proceed
@@ -179,18 +173,32 @@ class ApplicationController < ActionController::API
   def policy_invalid e
     logger.debug("#{e}\n#{e.backtrace.join("\n")}")
 
-    error = { code: "policy_invalid", message: e.message }
+    msg = e.message == nil ? e.to_s : e.message
+    error = { code: "policy_invalid", message: msg }
 
     if e.instance_of?(Conjur::PolicyParser::Invalid)
       error[:innererror] = {
         code: "policy_invalid",
         filename: e.filename,
-        line: e.mark.line,
-        column: e.mark.column
+        line: e.line,
+        column: e.column
       }
     end
 
     render(json: { error: error }, status: :unprocessable_entity)
+  end
+
+  def enhanced_policy_error e
+    logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    code = e.original_error.instance_of?(Conjur::PolicyParser::ResolverError) ? "validation_failed" : "policy_invalid"
+
+    render(json: {
+      error: {
+        code: code,
+        message: e.message
+      }
+    }, status: :unprocessable_entity)
   end
 
   def argument_error e
@@ -312,6 +320,23 @@ class ApplicationController < ActionController::API
         message: e.message
       }
     }, status: :not_implemented)
+  end
+
+  def not_allowed e
+    logger.debug("#{e}\n#{e.backtrace.join("\n")}")
+
+    error_message = if request.get?
+      "Read operations are not allowed"
+    else
+      "Write operations are not allowed"
+    end
+
+    render(json: {
+      error: {
+        code: 405,
+        message: error_message
+      }
+    }, status: 405)
   end
 
   # Gets the value of the :account parameter.

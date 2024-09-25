@@ -128,7 +128,7 @@ _run_cucumber_tests() {
   # entire arg, splits on the =, and uses the rhs as the value,
   env_var_flags+=(
     -e "CUCUMBER_NETWORK=$(_find_cucumber_network)"
-    -e "CUCUMBER_FILTER_TAGS=$CUCUMBER_FILTER_TAGS"
+    -e "INFRAPOOL_CUCUMBER_FILTER_TAGS=$INFRAPOOL_CUCUMBER_FILTER_TAGS"
   )
 
   # Add parallel process api_keys to the env_var_flags
@@ -148,12 +148,12 @@ _run_cucumber_tests() {
     run_flags+=(-T)
   fi
 
-  # THE CUCUMBER_FILTER_TAGS environment variable is not natively
+  # THE INFRAPOOL_CUCUMBER_FILTER_TAGS environment variable is not natively
   # implemented in cucumber-ruby, so we pass it as a CLI argument
   # if the variable is set.
   local cucumber_tags_arg
-  if [[ -n "$CUCUMBER_FILTER_TAGS" ]]; then
-    cucumber_tags_arg="--tags \"$CUCUMBER_FILTER_TAGS\""
+  if [[ -n "$INFRAPOOL_CUCUMBER_FILTER_TAGS" ]]; then
+    cucumber_tags_arg="--tags \"$INFRAPOOL_CUCUMBER_FILTER_TAGS\""
   fi
 
   # Stage 3: Run Cucumber
@@ -179,12 +179,11 @@ _run_cucumber_tests() {
   # Stage 4: Coverage results
   # -----------------------------------------------------------
 
-  # Simplecov writes its report using an at_exit ruby hook. If the container is
-  # killed before ruby, the report doesn't get written. So here we kill the
-  # process to write the report. The container is kept alive using an infinite
-  # sleep in the at_exit hook (see .simplecov).
+  # Generate the coverage report
   for parallel_service in "${parallel_services[@]}"; do
-    $COMPOSE exec -T "$parallel_service" bash -c "pkill -f 'puma 6'"
+    # SimpleCov will listen on the /tmp/simplecov.sock socket for a 'generate_report' command and block until the
+    # report is generated. The report will be written to /opt/conjur-server/coverage/.resultset.json
+    $COMPOSE exec -T "$parallel_service" bash -c "echo 'generate_report' | nc -U /tmp/simplecov.sock"
   done
 }
 

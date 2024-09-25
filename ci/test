@@ -41,13 +41,8 @@ source "./ci/shared.sh"
 # shellcheck disable=SC1091
 source "build_utils.sh"
 
-# Create a value to determine if the runtime container
-# for Jenkins can run Compose v2 syntax
-COMPOSE="docker compose"
-if grep -m 1 'Red Hat' /etc/os-release; then
-  COMPOSE="docker-compose"
-fi
-export COMPOSE
+# Alias the docker compose command for switching between versions
+export COMPOSE="docker compose"
 
 # Create default value if not set: allows compose to run in isolated namespace
 : "${COMPOSE_PROJECT_NAME:=$(openssl rand -hex 3)}"
@@ -71,6 +66,7 @@ SUBCOMMANDS
     authenticators_oidc    - Runs Cucumber OIDC Authenticator features
     authenticators_jwt     - Runs Cucumber JWT Authenticator features
     authenticators_status  - Runs Cucumber Authenticator status features
+    proxy                  - Runs Cucumber Proxy features
     policy                 - Runs Cucumber Policy features
     rotators               - Runs Cucumber Rotator features
     help                   - Show this message

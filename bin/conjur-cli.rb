@@ -43,8 +43,16 @@ command :server do |c|
   c.flag [ :p, :port ]
 
   c.desc 'Skip running database migrations on start'
-  c.default_value false
-  c.switch :'no-migrate'
+  c.default_value true
+  c.switch(:migrate)
+
+  c.desc 'Enable the Conjur rotation service'
+  c.default_value true
+  c.switch(:rotation)
+
+  c.desc 'Enable the local Conjur authentication socket'
+  c.default_value true
+  c.switch(:'authn-local')
 
   c.desc 'Server bind address'
   c.default_value(ENV['BIND_ADDRESS'] || '0.0.0.0')
@@ -60,7 +68,9 @@ command :server do |c|
       file_name: options[:file],
       bind_address: options[:'bind-address'],
       port: options[:port],
-      no_migrate: options[:'no-migrate']
+      no_migrate: !options[:migrate],
+      no_rotation: !options[:rotation],
+      no_authn_local: !options[:'authn-local']
     )
   end
 end
@@ -197,6 +207,16 @@ end
 desc "Manage roles"
 command :role do |cgrp|
   cgrp.desc "Retrieve a role's API key"
+  cgrp.arg(:role_id)
+  cgrp.command :"reset-password" do |c|
+    c.action do |global_options,options,args|
+      Commands::Role::ResetPassword.new.call(
+        role_id: args[0]
+      )
+    end
+  end
+
+  cgrp.desc "Reset a role's password and rotate its API key"
   cgrp.arg(:role_id, :multiple)
   cgrp.command :"retrieve-key" do |c|
     c.action do |global_options,options,args|

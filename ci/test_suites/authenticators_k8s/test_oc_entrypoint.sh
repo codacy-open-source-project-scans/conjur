@@ -162,8 +162,11 @@ function createSSLCertConfigMap() {
 function copyConjurPolicies() {
   cli_pod=$(retrieve_pod conjur-cli)
 
+  # Avoid using oc rsync because it requires the `tar` or `rsync` commands to
+  # be installed on the source and destination pods. Instead, use
+  # `oc exec` to write the policy file to the destination pod.
   oc exec $cli_pod -- mkdir /policies
-  oc rsync ./dev/policies $cli_pod:/
+  oc exec -i $cli_pod -- sh -c "cat - > /policies/policy.${TEMPLATE_TAG}yml" < ./dev/policies/policy.${TEMPLATE_TAG}yml
 }
 
 function loadConjurPolicies() {
@@ -171,15 +174,15 @@ function loadConjurPolicies() {
 
   cli_pod=$(retrieve_pod conjur-cli)
 
-  oc exec $cli_pod -- conjur init -u conjur -a cucumber
+  oc exec $cli_pod -- conjur init --insecure --url conjur --account cucumber
   sleep 5
-  oc exec $cli_pod -- conjur authn login -u admin -p $API_KEY
+  oc exec $cli_pod -- conjur login --id admin --password $API_KEY
 
-  wait_for_it 300 "oc exec $cli_pod -- conjur policy load root /policies/policy.${TEMPLATE_TAG}yml"
+  wait_for_it 300 "oc exec $cli_pod -- conjur policy load --branch root --file /policies/policy.${TEMPLATE_TAG}yml"
 
   # init ca certs
   conjur_pod=$(retrieve_pod conjur-authn-k8s)
-  oc exec $conjur_pod -- rake authn_k8s:ca_init["conjur/authn-k8s/minikube"]
+  oc exec $conjur_pod -- bundle exec rake authn_k8s:ca_init["conjur/authn-k8s/minikube"]
 }
 
 function launchInventoryServices() {

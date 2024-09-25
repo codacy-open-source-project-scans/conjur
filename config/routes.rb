@@ -29,12 +29,16 @@ Rails.application.routes.draw do
 
         get '/:authenticator(/:service_id)/:account/login' => 'authenticate#login'
 
+        constraints authenticator: /authn/ do
+          post '/:authenticator/:account/:id/authenticate' => 'authenticate#authenticate_via_post'
+        end
+
         constraints authenticator: /authn|authn-azure|authn-iam|authn-k8s|authn-ldap/ do
           post '/:authenticator(/:service_id)/:account/:id/authenticate' => 'authenticate#authenticate'
         end
 
         # New OIDC endpoint
-        get '/:authenticator(/:service_id)/:account/authenticate' => 'authenticate#oidc_authenticate_code_redirect'
+        get '/:authenticator(/:service_id)/:account/authenticate' => 'authenticate#authenticate_via_get'
 
         post '/authn-gcp/:account/authenticate' => 'authenticate#authenticate_gcp'
         post '/authn-oidc(/:service_id)/:account/authenticate' => 'authenticate#authenticate_oidc'
@@ -52,9 +56,20 @@ Rails.application.routes.draw do
       end
 
       # Factories
-      post "/factories/:account/:kind/(:version)/:id" => "policy_factories#create"
-      get "/factories/:account/:kind/(:version)/:id" => "policy_factories#show"
-      get "/factories/:account" => "policy_factories#index"
+
+      # Trip or reenable the factory resource's circuit breaker
+      # These need to be ahead of the create route below to allow it to match
+      post    "/factory-resources/:account/:policy_identifier/disable" => "policy_factory_resources#disable"
+      post    "/factory-resources/:account/:policy_identifier/enable" => "policy_factory_resources#enable"
+
+      # Endpoints for managing Policy Factory created resources
+      get     "/factory-resources/:account" => "policy_factory_resources#index"
+      get     "/factory-resources/:account/:policy_identifier" => "policy_factory_resources#show"
+      match   "/factory-resources/:account/:kind/(:version)/:id" => "policy_factory_resources#create", via: [:post, :patch]
+
+      # Endpoints related to viewing factories
+      get     "/factories/:account/:kind/(:version)/:id" => "policy_factories#show"
+      get     "/factories/:account" => "policy_factories#index"
 
       get     "/roles/:account/:kind/*identifier" => "roles#graph", :constraints => QueryParameterActionRecognizer.new("graph")
       get     "/roles/:account/:kind/*identifier" => "roles#all_memberships", :constraints => QueryParameterActionRecognizer.new("all")
@@ -81,6 +96,7 @@ Rails.application.routes.draw do
       post    "/secrets/:account/:kind/*identifier" => 'secrets#create'
       get     "/secrets"                            => 'secrets#batch'
 
+      get     "/policies/:account/:kind/*identifier" => 'policies#get'
       put     "/policies/:account/:kind/*identifier" => 'policies#put'
       patch   "/policies/:account/:kind/*identifier" => 'policies#patch'
       post    "/policies/:account/:kind/*identifier" => 'policies#post'

@@ -13,9 +13,9 @@ if [ ! -f "../VERSION" ]; then
 fi
 
 # Minimal set of services.  We add to this list based on cmd line flags.
-services=(pg conjur client)
+services=(pg conjur client cucumber)
 
-# Authenticators to enable. 
+# Authenticators to enable.
 default_authenticators="authn,authn-k8s/test"
 enabled_authenticators="$default_authenticators"
 
@@ -98,7 +98,7 @@ Usage: start [options]
     --authn-gcp     Starts with authn-gcp as authenticator
     --authn-iam     Starts with authn-iam/prod as authenticator
     --authn-jwt     Starts with authn-jwt as authenticator
-    --authn-ldap    Starts OpenLDAP server and loads a demo policy to enable 
+    --authn-ldap    Starts OpenLDAP server and loads a demo policy to enable
                     authentication via:
                     'curl -X POST -d "alice" http://localhost:3000/authn-ldap/test/cucumber/alice/authenticate'
     -h, --help      Shows this help message.
@@ -182,7 +182,7 @@ client_load_policy() {
   local policy_file=$1
 
   docker compose exec client \
-    conjur policy load root "$policy_file"
+    conjur policy load --branch root --file "$policy_file"
 }
 
 client_add_secret() {
@@ -190,7 +190,7 @@ client_add_secret() {
   local value=$2
 
   docker compose exec client \
-    conjur variable values add "$variable" "$value"
+    conjur variable set --id "$variable" --value "$value"
 }
 
 start_conjur_server() {
@@ -209,7 +209,7 @@ wait_for_conjur() {
 
   docker compose exec -T conjur conjurctl wait
 
-  docker compose exec client conjur authn login -u admin -p "$api_key"
+  docker compose exec client conjur login --id admin --password  "$api_key"
 }
 
 configure_oidc_authenticators() {
@@ -239,8 +239,8 @@ setup_keycloak() {
   source "oauth/keycloak/keycloak_functions.sh"
   popd
 
-  # Start keycloak docker-compose service
-  services+=(keycloak)
+  # Start keycloak docker-compose service and tinyproxy for OIDC proxy tests
+  services+=(keycloak tinyproxy)
   docker compose up -d --no-deps "${services[@]}"
 
   # Start conjur again, since it is recreating by docker compose because of
@@ -249,6 +249,9 @@ setup_keycloak() {
   wait_for_keycloak_server
 
   fetch_keycloak_certificate
+  if [[ $ENABLE_AUTHN_JWT = true ]]; then
+    add_keycloak_certificate_to_truststore
+  fi
 
   # Create Conjur AuthnOIDC services and users
   configure_oidc_v1 \
@@ -321,9 +324,6 @@ configure_oidc_v2() {
   client_add_secret "conjur/authn-oidc/$service_id/redirect_uri" "http://localhost:3000/authn-oidc/$service_id/cucumber/authenticate"
   if [ "$service_id" = "keycloak2" ]; then
     client_add_secret "conjur/authn-oidc/$service_id/ca-cert" "$($COMPOSE exec conjur cat /etc/ssl/certs/keycloak.pem)"
-    # Delete the symlink so we can test with the 'ca-cert' variable
-    hash=$($COMPOSE exec conjur openssl x509 -hash -in /etc/ssl/certs/keycloak.pem --noout)
-    $COMPOSE exec conjur rm "/etc/ssl/certs/$hash.0" || true
   fi
 
   client_load_policy "/src/conjur-server/dev/policies/authenticators/authn-oidc/$service_id-users.yml"
@@ -334,7 +334,7 @@ enable_oidc_authenticators() {
     echo "Configuring Keycloak as OpenID provider for manual testing"
     # We enable an OIDC authenticator without a service-id to test that it's
     # invalid.
-    enabled_authenticators="$enabled_authenticators,authn-oidc/keycloak,authn-oidc,authn-oidc/keycloak2"
+    enabled_authenticators="$enabled_authenticators,authn-oidc/keycloak,authn-oidc,authn-oidc/keycloak2,authn-oidc/keycloak2-long-lived"
   fi
 
   if [[ $ENABLE_OIDC_OKTA = true ]]; then
@@ -414,7 +414,7 @@ init_azure() {
 
   enabled_authenticators="$enabled_authenticators,authn-azure/prod"
 
-  ../ci/authn-azure/check_dependencies.sh
+  ../ci/test_suites/authenticators_azure/check_dependencies.sh
 
   client_load_policy \
     "/src/conjur-server/ci/test_suites/authenticators_azure/policies/policy.yml"

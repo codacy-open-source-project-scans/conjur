@@ -18,6 +18,7 @@ function print_help() {
   echo " --redhat: publish image to redhat registry"
   echo " --version=VERSION: specify version number to use"
   echo " --base-version=VERSION: specify base image version number to use to apply tags to"
+  echo " --arch=ARCH: specify architecture for tagging an image (default 'amd64'). Possible values are: amd64,arm64"
 }
 
 PUBLISH_EDGE=false
@@ -26,6 +27,7 @@ PROMOTE=false
 REDHAT=false
 DOCKERHUB=false
 VERSION=$(<VERSION)
+ARCH="amd64"
 
 LOCAL_TAG="$(version_tag)"
 
@@ -59,6 +61,10 @@ for arg in "$@"; do
       LOCAL_TAG="${arg#*=}"
       shift
       ;;
+    --arch=* )
+      ARCH="${arg#*=}"
+      shift
+      ;;
     * )
       echo "Unknown option: ${arg}"
       print_help
@@ -86,49 +92,55 @@ fi
 
 # Only push SHA images on internal
 if [[ "${PUBLISH_INTERNAL}" = true ]]; then
-  echo "Pushing ${LOCAL_TAG} tagged images to registry.tld..."
+  echo "Pushing ${LOCAL_TAG}-${ARCH} tagged images to registry.tld..."
   # Always push SHA versioned images internally
-  tag_and_push "${VERSION}-${LOCAL_TAG}" "${LOCAL_IMAGE}" "registry.tld/conjur"
-  tag_and_push "${VERSION}-${LOCAL_TAG}" "conjur-test:${LOCAL_TAG}" "registry.tld/conjur-test"
-  tag_and_push "${VERSION}-${LOCAL_TAG}" "conjur-ubi:${LOCAL_TAG}" "registry.tld/conjur-ubi"
+  tag_and_push "${VERSION}-${LOCAL_TAG}-${ARCH}" "${LOCAL_IMAGE}" "registry.tld/conjur"
+  tag_and_push "${VERSION}-${LOCAL_TAG}-${ARCH}" "conjur-test:${LOCAL_TAG}" "registry.tld/conjur-test"
+  tag_and_push "${VERSION}-${LOCAL_TAG}-${ARCH}" "conjur-ubi:${LOCAL_TAG}" "registry.tld/conjur-ubi"
 
   # Push SHA only tagged images to our internal registry
-  tag_and_push "${LOCAL_TAG}" "${LOCAL_IMAGE}" "registry.tld/conjur"
-  tag_and_push "${LOCAL_TAG}" "conjur-test:${LOCAL_TAG}" "registry.tld/conjur-test"
-  tag_and_push "${LOCAL_TAG}" "conjur-ubi:${LOCAL_TAG}" "registry.tld/conjur-ubi"
+  tag_and_push "${LOCAL_TAG}-${ARCH}" "${LOCAL_IMAGE}" "registry.tld/conjur"
+  tag_and_push "${LOCAL_TAG}-${ARCH}" "conjur-test:${LOCAL_TAG}" "registry.tld/conjur-test"
+  tag_and_push "${LOCAL_TAG}-${ARCH}" "conjur-ubi:${LOCAL_TAG}" "registry.tld/conjur-ubi"
 fi
 
 if [[ "${PUBLISH_EDGE}" = true ]]; then
   echo "Pushing edge versions..."
 
   # Publish release specific versions internally
-  echo "Pushing ${VERSION} to registry.tld..."
-  tag_and_push "${VERSION}" "${LOCAL_IMAGE}" "registry.tld/${IMAGE_NAME}"
-  tag_and_push "${VERSION}" "${RH_LOCAL_IMAGE}" "registry.tld/conjur-ubi"
+  echo "Pushing ${VERSION}-${ARCH} to registry.tld..."
+  tag_and_push "${VERSION}-${ARCH}" "${LOCAL_IMAGE}" "registry.tld/${IMAGE_NAME}"
+  tag_and_push "${VERSION}-${ARCH}" "${RH_LOCAL_IMAGE}" "registry.tld/conjur-ubi"
 
   # Push image to internal registry
-  tag_and_push "edge" "${LOCAL_IMAGE}" "registry.tld/${IMAGE_NAME}"
-  tag_and_push "edge" "${RH_LOCAL_IMAGE}" "registry.tld/conjur-ubi"
+  tag_and_push "edge-${ARCH}" "${LOCAL_IMAGE}" "registry.tld/${IMAGE_NAME}"
+  tag_and_push "edge-${ARCH}" "${RH_LOCAL_IMAGE}" "registry.tld/conjur-ubi"
 
   # Publish release specific and edge tags to dockerhub
   if [[ "${DOCKERHUB}" = true ]]; then
+    echo "Pushing to DockerHub"
+    
     tag_and_push "${VERSION}" "${LOCAL_IMAGE}" "${IMAGE_NAME}"
     tag_and_push "edge" "${LOCAL_IMAGE}" "${IMAGE_NAME}"
   fi
 fi
 
 if [[ "${PROMOTE}" = true ]]; then
-  echo "Promoting image to ${VERSION}"
-
+  echo "Promoting image to ${VERSION}-${ARCH}"
+  
   # Push latest, 1.x.y, 1.x, and 1 images
   readarray -t prefix_versions < <(gen_versions "${VERSION}")
 
   for version in latest "${prefix_versions[@]}"; do
-    tag_and_push "${version}" "${LOCAL_IMAGE}" "registry.tld/${IMAGE_NAME}"
-    tag_and_push "${version}" "${RH_LOCAL_IMAGE}" "registry.tld/conjur-ubi"
+    echo "Pushing images for tag: $version-${ARCH}"
+
+    tag_and_push "${version}-${ARCH}" "registry.tld/${IMAGE_NAME}:${LOCAL_TAG}-${ARCH}" "registry.tld/${IMAGE_NAME}"
+    tag_and_push "${version}-${ARCH}" "registry.tld/conjur-ubi:${LOCAL_TAG}-${ARCH}" "registry.tld/conjur-ubi"
 
     if [[ "${DOCKERHUB}" ]]; then
-      tag_and_push "${version}" "${LOCAL_IMAGE}" "${IMAGE_NAME}"
+      echo "Pushing to DockerHub"
+      
+      tag_and_push "${version}-${ARCH}" "${LOCAL_IMAGE}-${ARCH}" "${IMAGE_NAME}"
     fi
   done
 fi
@@ -138,13 +150,13 @@ if [[ "${REDHAT}" = true ]]; then
   # Publish only the tag version to the Redhat container registry
   if docker login "${REDHAT_REGISTRY}" -u "${REDHAT_USER}" -p "${REDHAT_API_KEY}"; then
     # push image to red hat
-    tag_and_push "${VERSION}" "${RH_LOCAL_IMAGE}" "${REDHAT_REMOTE_IMAGE}"
+    tag_and_push "${VERSION}" "${RH_LOCAL_IMAGE}-${ARCH}" "${REDHAT_REMOTE_IMAGE}"
 
     # scan image with preflight tool
     scan_redhat_image "${REDHAT_REMOTE_IMAGE}:${VERSION}" "${REDHAT_CERT_PID}"
 
     # push latest tag to RH
-    tag_and_push "latest" "${RH_LOCAL_IMAGE}" "${REDHAT_REMOTE_IMAGE}"
+    tag_and_push "latest" "${RH_LOCAL_IMAGE}-${ARCH}" "${REDHAT_REMOTE_IMAGE}"
   else
     echo 'Failed to log in to quay.io'
     exit 1

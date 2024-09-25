@@ -2,22 +2,31 @@ module Conjur
   module PolicyParser
     class Resolver
       attr_reader :account, :ownerid, :namespace
-      
+
       class << self
         # Resolve records to the specified owner id and namespace.
         def resolve records, account, ownerid
-          [
-            AccountResolver,
-            PolicyNamespaceResolver,
-            RelativePathResolver,
-            OwnerResolver,
-            FlattenResolver,
-            DuplicateResolver,
-            AbsoluteChecker
-          ].each do |cls|
-            resolver = cls.new(account, ownerid)
-            records = resolver.resolve(records)
+          begin
+            [
+              AccountResolver,
+              PolicyNamespaceResolver,
+              RelativePathResolver,
+              UserIdentifierNotationResolver,
+              OwnerResolver,
+              FlattenResolver,
+              DuplicateResolver,
+              AbsoluteChecker
+            ].each do |cls|
+              resolver = cls.new(account, ownerid)
+              records = resolver.resolve(records)
+            end
+          rescue => e
+            # Wrap in ResolverError, so we can pass it to EnhancedPolicyError
+            raise ResolverError.new(
+              original_error: e
+            )
           end
+
           records
         end
       end
@@ -92,9 +101,6 @@ module Conjur
         @namespace = saved_namespace
       end
 
-      def user_namespace
-        namespace&.gsub('/', '-')
-      end
     end
 
     # Form absolute ids by prepending the implicit namespace defined by the policy tree.
@@ -109,22 +115,39 @@ module Conjur
 
       def prepend_namespace record
         id = record.id
-
         if id.blank?
           raise "#{record.class.simple_name.underscore} has a blank id" unless namespace
-
-          id = namespace
+          return namespace
         elsif id.start_with?('/')
           # absolute id, pass
-        else
-          id = if record.respond_to?(:resource_kind) && record.resource_kind == "user"
-            [ id, user_namespace ].compact.join('@')
-          else
-            [ namespace, id ].compact.join('/')
-          end
+          return id
+        end
+        [ namespace, id ].compact.join('/')
+      end
+    end
+
+    # Form the special '@' notation ids for users, expects absolute and relative addressing to be already resolved
+    class UserIdentifierNotationResolver < PolicyTraversal
+      def resolve_record record, visited
+        if record.respond_to?(:id) && record.respond_to?(:id=) && record.respond_to?(:resource_kind) && record.resource_kind == "user"
+          record.id = resolve_user_id(record)
         end
 
-        id
+        super
+      end
+
+      def resolve_user_id record
+        id = record.id
+        tokens = id.split('/')
+        # we don't allow '..' in user id here, if it is valid it should be resolved by the relative path resolver
+        raise "Invalid relative reference: #{id}" if tokens.find_index('..')
+
+        id = tokens.last
+        tokens.pop # remove the actual identifier
+        return id if tokens.empty?
+
+        user_namespace = tokens.compact.join('-')
+        [ id, user_namespace ].compact.join('@')
       end
     end
 
@@ -190,7 +213,7 @@ module Conjur
       # Resolve paths starting with '/' as an absolute path by stripping the leading character.
       # Substitute leading '..' tokens in the id with an appropriate prefix from the namespace.
       def absolute_path_of id
-        return id[1..-1] if id.start_with?('/')
+        id = id[1..-1] if id.start_with?('/')
 
         tokens = id.split('/')
         loop do

@@ -9,6 +9,7 @@ Then(/^the error message is "([^"]*)"$/) do |message|
 end
 
 Then(/^the error message includes "([^"]*)"$/) do |message|
+  $stderr.puts("Got message field: #{@error['message']}")
   expect(@error['message']).to include(message)
 end
 
@@ -34,4 +35,58 @@ end
 
 Then(/^there's no error$/) do
   expect(@result.body).not_to have_key('error')
+end
+
+Then(/^the policy status is "([^"]*)"$/) do |status|
+  expect(@result.body).to have_key('status')
+  expect(@result.body['status']).to match(status)
+end
+
+Then(/^the policy error includes "([^"]*)"$/) do |message|
+  expect(@result.body).to have_key('errors')
+  @error = @result.body['errors'][0]
+  expect(@error).to have_key('message')
+  @policymessage = @error['message']
+  expect(@policymessage).to include(message)
+end
+
+# Starting with the validation/dry-run feature the error response
+# is structured as:
+#          "status" => "Invalid YAML",
+#          "errors" => [
+#            {
+#              "line"    => error.line.to_s,
+#              "column"  => error.column.to_s,
+#              "message" => [error.message.to_s, error.enhanced_message.to_s].join("\n")
+#            }
+#          ]
+# Note: in the initial feature errors[] contains one element.
+
+Then(/^the status is "([^"]*)"$/) do |status|
+  @result = json_result
+  expect(@result).to have_key('status')
+  expect(@result['status']).to match(status)
+end
+
+Then(/^there are no errors$/) do
+  @result = json_result
+  expect(@result).to have_key('errors')
+  expect(@result['errors'].length).to be(0)
+end
+
+Then(/^the validation error includes "([^"]*)"$/) do |message|
+  @result = json_result
+  expect(@result).to have_key('errors')
+  @message = @result['errors'][0]['message']
+  @original = @message.split("\n")
+  expect(@original[0]).to include(message)
+end
+
+Then(/^the enhanced error includes "([^"]*)"$/) do |message|
+  @result = json_result
+  expect(@result).to have_key('errors')
+  @message = @result['errors'][0]['message']
+  @messages = @message.split("\n")
+  @enhanced = @messages[1, @messages.length].join(' ')
+  expect(@enhanced).to include(message)
 end

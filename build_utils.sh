@@ -25,8 +25,31 @@ function tag_and_push() {
 
   for image in "$@"; do
     local target=$image:$tag
-    echo "Tagging and pushing $target..."
+    echo "Tagging $source as $target and pushing..."
     docker tag "$source" "$target"
     docker push "$target"
   done
+}
+
+# prepare_manifest image tag
+function prepare_manifest() {
+  local image="$1"
+  local tag="$2"
+
+  docker pull "${image}:${tag}-amd64"
+  docker pull "${image}:${tag}-arm64"
+
+  docker manifest create \
+    --insecure \
+    "${image}:${tag}" \
+    --amend "${image}:${tag}-amd64" \
+    --amend "${image}:${tag}-arm64"
+
+  docker manifest push --insecure "${image}:${tag}"
+
+  # Because the bill of materials is created based on local docker images this is necessary in order to have
+  # identical records in BOM files as previously, before multi-arch changes
+  docker rmi "${image}:${tag}-amd64"
+  docker rmi "${image}:${tag}-arm64"
+  docker pull "${image}:${tag}"
 }

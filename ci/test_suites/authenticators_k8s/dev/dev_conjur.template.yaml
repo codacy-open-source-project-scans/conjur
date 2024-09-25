@@ -57,7 +57,7 @@ spec:
         app: postgres
     spec:
       containers:
-      - image: postgres:10.16
+      - image: postgres:15
         imagePullPolicy: Always
         name: postgres
         env:
@@ -104,10 +104,6 @@ spec:
           value: test
         # Enable coverage tracking.
         - name: REQUIRE_SIMPLECOV
-          value: "true"
-        # Sleep after generating the coverage report to keep the pod alive
-        # so the report can be retrieved.
-        - name: SIMPLECOV_SLEEP
           value: "true"
         - name: WEB_CONCURRENCY
           value: "0"
@@ -177,7 +173,7 @@ spec:
     spec:
       containers:
       - name: conjur-cli
-        image: cyberark/conjur-cli:5
+        image: cyberark/conjur-cli:8
         imagePullPolicy: Always
         command: ["sleep", "infinity"]
         env:

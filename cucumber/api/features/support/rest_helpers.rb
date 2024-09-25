@@ -58,7 +58,7 @@ module RestHelpers
   def get_json_no_accept_header(path, options = {})
     uri = URI(root_url + denormalize(path))
     headers = request_opts(options)[:headers]
-    http = Net::HTTP.new(uri.host, uri.port)
+    http = Net::HTTP.new(uri.hostname, uri.port)
     request = Net::HTTP::Get.new(uri.request_uri)
 
     request.delete('Accept')
@@ -329,7 +329,18 @@ module RestHelpers
     @http_status = $ERROR_INFO.http_code
     raise if can
 
-    set_result(@exception.response)  
+    set_result(@exception.response)
+  end
+
+  def try_request_accepting http_code
+    yield
+  rescue RestClient::Exception
+    puts($ERROR_INFO)
+    @exception = $ERROR_INFO
+    @http_status = $ERROR_INFO.http_code
+    raise unless @http_status == http_code
+
+    set_result(@exception.response)
   end
 
   def account
